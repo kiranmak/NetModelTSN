@@ -1,0 +1,13 @@
+[project]
+name = "netmod"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "requests>=2.34.2",
+    "seaborn>=0.13.2",
+    "simpy>=4.1.2",
+]

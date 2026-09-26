@@ -1,0 +1,96 @@
+Key Functional Explanations
+1. The Bitmask Gate Control:
+  -   0b1000 is an 8-bit integer acting as an array of
+     binary switches. By evaluating gate_mask & (1 << q_idx), the simulator checks
+     individual bit assignments.
+  -  For instance, priority queue 2 checks bit position 2 (1 << 2 equals 0b0100).
+2. Strict Priority Scheduling:
+     * egress_scheduler_loop --> scans from priority 3 down to 0.
+     -  If a packet is sitting in Queue 3 and its gate is open, it will always
+         preempt execution over packets sitting in Queue 2 or Queue 1.
+     * Queue Isolation: Best-Effort traffic (Control_BE, Queue 0) is blocked completely
+       during the first 50ms of every cycle (0b1000 and 0b1100). This ensures zero jitter
+        impacts on high-priority Control_TT.
+
+3. change the simulation time scale from milliseconds to microseconds (µs):
+    adjust the Time Constants:
+    -  Scale up parameters (e.g., a 100 ms cycle becomes 100_000 µs).
+    - The Transmission Delay Calculation:
+      Ensure packet size conversion matches your network link speed in bits per microsecond.
+      For a standard 1 Gbps link, the transmission speed is
+         1,000 bits per microsecond (since 1 Gbps = 10⁹ bits/sec = 1,000 bits/µs).
+      yield env.timeout(1.0): The resolution minimum step in the idle scanning phase is dropped
+      from 1 ms to 1 µs for fine-grained scheduling accuracy.
+
+3.3. Computation for the packet sizes in Bytes.
+    update the transmission delay calculation inside your switch loop. 1 Byte = 8 bits, formula changes to:
+    Transmission  Delay (μs)= (Pkt_Size_in_Bytes * 8)/ Link_Speed_in_Bits_per_μs
+
+4. Impact of Packet Sizes: 
+    For a Control_TT packet of 200 bytes, the simulation handles it flawlessly behind the scenes:
+  - Shorter Line Delay: The switch calculates transmission time of (200 × 8) / 1000 = 1.6 µs.
+  - Faster Queue Clearing: Because the packet clears the wire much faster, the switch loop spends
+     less time stuck in yield env.timeout(tx_delay_us).
+  - It will move on to process the next packet in queue. 
+  - egress_scheduler_loop acts like a real hardware ASIC pipeline:
+    It looks at the packet at the front of the line.
+    It checks how large it is right now. 
+    It locks the wire for exactly that duration and then moves on.
+    - we can mix frame sizes across different traffic generators (e.g., 64 bytes
+      for control messages, 200 bytes for telemetry, and 1518 bytes for best-effort data copies)
+
+5. Packet periord: rate at which packets arrive:
+    - A period_us = 200.0 means the traffic generator will sleep for exactly 200 microseconds,
+      wake up, drop a packet into the queue, and then sleep for another 200 microseconds.
+    - If period_us is large (e.g., 10000.0 or 10ms): Packets arrive slowly and spread far apart.
+    - If period_us is small (e.g.,    50.0 or 50µs): Packets arrive rapidly in a dense stream, filling up
+      the switch's queue.
+6. To verify if a specific flow will fit inside your Gate Control List (GCL) window:
+    a. Control_TT flow with a period_us = 10000.0 (10ms) and a frame size of 200 bytes
+       takes 1.6 µs to transmit.
+       - GCL keeps the high-priority gate open for a duration = 1000.0 µs:
+       - i.e. exactly one packet will arrive every 10,000 µs.
+       - When its gate opens for 1,000 µs, that lone packet only needs 1.6 µs to clear out.
+       - This leaves 998.4 µs of "wasted" or empty time in that window.
+
+       This is why we can safely shrink the TT window earlier — knowing the period(arrival rate) tells you
+       how many packets can accumulate between gate openings!
+
+7. Allocating link bandwidth in percent utilization per traffic type.
+    To achieve this, map percentage allocations directly to the physical capacity of the link.
+    - Lets say link speed (1 Gbps, or 1,000 bits/µs), a percentage allocation represents a dedicated bandwidth quota
+      in bits per microsecond. If you know the desired bandwidth quota and the average packet size in bytes,
+      we can calculate the necessary packet arrival frequency (period_us) using this formula:
+         Throughput_Quota (bits/μ s) = (Link_Speed_(1,000)) * Allocation_%)
+                   Packet_Size(bits) = (Packet_Size (Bytes)) * 8
+      Required_Period (μs) = Packet_Size (bits)/Throughput_Quota (bits/μs)
+
+8: runnig 2 flavors of test:
+    A. Absolute schedule and saying packet arrives every so milli seconds of n bytes.
+    --- TSN Traffic Profile Configuration ---
+        Class: Control_TT      | Size:  200 Bytes | Fixed period_us:  6000.00 µs
+        Class: Mission_Crit    | Size:  400 Bytes | Fixed period_us:  5000.00 µs
+        Class: Telemetry       | Size:  600 Bytes | Fixed period_us:  4000.00 µs
+        Class: Best_Effort     | Size: 1200 Bytes | Fixed period_us:  2000.00 µs
+
+    In gcl_absolute_profile: We requested 1 packet of 200 Bytes every 6,000 µs.
+        Bits per packet: 200 × 8 = 1,600 bits
+        Throughput: 1,600 bits / 6,000 µs = 0.266 bits/µs
+        True Link Utilization: 0.266/1,000 bits/µs = 0.0266 % (Less than } 0.1%)
+
+
+    B. Quota based schedule, saying link will be consumed x% of time by specific traffic type. 
+        --- TSN Traffic Profile Configuration ---
+        Class: Control_TT      | Budget:  10% | Size:  200 Bytes | Computed period_us:    16.00 µs
+    Class: Mission_Crit    | Budget:  20% | Size:  400 Bytes | Computed period_us:    16.00 µs
+    Class: Telemetry       | Budget:  40% | Size:  600 Bytes | Computed period_us:    12.00 µs
+    Class: Best_Effort     | Budget:  20% | Size: 1518 Bytes | Computed period_us:    60.72 µs
+    Allocated Idle Capacity: 10.0%
+
+    For 20% link utilization:
+    Allocated Throughput: 1,000 bits/µs × 0.20 = 200 bits/µs
+    Required Frequency: 200-byte packet to consume massive 200 bits every single µs.
+                        It must arrive every 8.00 µs (1,600 bits/200 bits/μs).
+    By setting the budget to 20%, the generator has to flood the network 750 times faster
+    than the absolute profile did!
+
